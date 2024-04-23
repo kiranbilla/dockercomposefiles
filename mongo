@@ -1,0 +1,34 @@
+#docker-compose up -d
+#docker compose down
+#mongodump -d databasename mongodb://admin:admin@locahost(or)IP:27017/?authSource=admin  -o /home/ubuntu/dump/ ======>>>> whole database
+# mongorestore mongodb://admin:admin@locahost(or)IP:27017/?authSource=admin  /home/ubuntu/dump =======>>>>>> whole db restore
+# mongoexport --db databasename --collection collectionname mongodb://admin:admin@locahost(or)IP:27017/?authSource=admin  --out output.json  =========>>>> paticular collection
+# mongoimport --db databasename --collection collectionname mongodb://admin:admin@locahost(or)IP:27017/?authSource=admin  --file output.json =========>>>> paticular collection
+version: "3.4"
+services:
+  mongodb_container:
+    image: mongo:7.0.8
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin
+    deploy:
+       replicas: 1
+    ports:
+      - 27017:27017
+     # outexposeport:insideport
+    
+    volumes:
+      - /home/ubuntu/mongodb:/data/db
+    #  - /root/data/mongod:/root/data  #needto change  local path:insidedockerpath
+     # - /root/logs/mongod:/root/logs  #need to change
+     # - ./mongod.conf:/etc/mongod.conf #need to change
+   # command: --config /etc/mongod.conf
+
+volumes:
+  mysql_data_volume:      
+    driver: local
+    driver_opts:
+        o: bind
+        type: none
+        device: /home/ubuntu/mongodb
