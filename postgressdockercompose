@@ -1,0 +1,65 @@
+version: "3.4"
+services:
+  rabbitmq3:
+    container_name: "rabbitmq_sample"
+    image: rabbitmq:3.8-management-alpine
+    environment:
+      - RABBITMQ_DEFAULT_USER=admin
+      - RABBITMQ_DEFAULT_PASS=admin
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    volumes:           
+        - /home/ubuntu/.docker-conf/rabbitmq/data/:/var/lib/rabbitmq/           
+        - /home/ubuntu/.docker-conf/rabbitmq/log/:/var/log/rabbitmq/  
+  mysql:
+    image: mysql:latest
+    container_name: dev_mysql
+    restart: always
+    ports:
+      # <Port exposed> : < MySQL Port running inside container>
+      - "3336:3306"
+    volumes:
+      - /home/ubuntu/mysql/data/db:/var/lib/mysql
+    environment:
+      MYSQL_DATABASE: "db"
+      MYSQL_USER: "admin"
+      MYSQL_PASSWORD: "WnEARB3sXyNV"
+      MYSQL_ROOT_PASSWORD: "root"
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: "dev_phpmyadmin"
+    restart: always
+    ports:
+      - 9090:80
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306      
+        
+  pgadmin_container:
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@pgadmin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+volumes:  
+  rabbitmq_data_volume:    
+    driver: local    
+    driver_opts:       
+       o: bind       
+       type: none       
+       device: /home/ubuntu/.docker-conf/rabbitmq/data/
+  rabbitmq_log_volume:
+    driver: local
+    driver_opts:
+       o: bind
+       type: none
+       device: /home/ubuntu/.docker-conf/rabbitmq/log/
+  mysql_data_volume:
+    driver: local
+    driver_opts:
+       o: bind
+       type: none
+       device: /home/ubuntu/mysql      
