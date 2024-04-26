@@ -1,0 +1,512 @@
+NGINX proxy_pass to CloudFront with customm domains
+
+
+sudo certbot --nginx
+
+
+
+The solution is to have a single certificate file containing all the domains and add those domains to CloudFront's Alternate domain name list.
+
+I decided to solve it with a Reverse Proxy (NGINX) and Let'sencrypt (certbot) Here are the steps:
+
+    Setup an NGINX server to act as a reverse proxy
+    Create a CNAME record pointing to the proxy server from step 1
+    Create a Virtual Host file for the certbot (Let's Encrypt) challenge and restart NGINX (sudo nginx -s reload):
+
+    server {
+        listen 80;
+        server_name aaa.example.com;
+        access_log /var/log/nginx/$server_name-access.log;
+        error_log /var/log/nginx/$server_name-error.log;
+
+        location /.well-known/acme-challenge/ {
+          root /web/sites/$server_name/www/;
+        }
+
+    location / {
+        proxy_pass https://d2c4fb2vqtbx6f.cloudfront.net/channel/vfc-bcxfhh37u/;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Real-IP $remote_addr;
+        }
+    }
+
+    Created a bash script that will update the certificate:
+
+#!/bin/bash
+
+CF_Dist_id=ES70C33IOVC7G
+Cert_ARN=arn:aws:acm:us-east-1:723678323458:certificate/48g54dre-5t6b-gf20-9c74-5d6435333dd5
+Cert_Name=allcustomdomain
+Region=us-east-1 #Certs must remain in us-east-1 regardless of your env. region
+
+#List all existing domains and add them to array
+mapfile -t domains  < <(sudo cat /etc/letsencrypt/live/$Cert_Name/cert.pem | openssl x509 -text | grep DNS | tr , '\n' | sed 's/DNS://g' | tr -s ' ')
+
+#Check if cert already exist
+if [[ $domains == *"$1"* ]]; then
+  echo "Certificate already exists"
+  exit 1
+fi
+
+#Build domains list for certbot
+i=0
+while [ $i -le $(("${#domains[@]}"-1)) ];
+do
+        domainslst="$domainslst -d "${domains[$i]}""
+        i=$(($i+1))
+done
+
+domainslst="$domainslst -d $1"
+
+echo $domainslst
+
+
+#Generate certificate
+sudo certbot certonly  --expand --nginx  --non-interactive --agree-tos --email me@example.com --cert-name $Cert_Name $domainslst
+
+#Update ACM with new cert
+sudo /usr/local/bin/aws acm import-certificate --certificate-arn $Cert_ARN --certificate fileb:///etc/letsencrypt/live/$Cert_Name/cert.pem --private-key fileb:///etc/letsencrypt/live/$Cert_Name/privkey.pem --certificate-chain fileb:///etc/letsencrypt/live/$Cert_Name/fullchain.pem --region $Region
+
+
+#Get current CloudFront dist config
+ETag=$(/usr/local/bin/aws cloudfront get-distribution-config --id $CF_Dist_id | jq -r '.ETag')
+/usr/local/bin/aws cloudfront get-distribution-config --query 'DistributionConfig' --id $CF_Dist_id > dist.json
+
+#Update the config file with the new custom domain
+jq --arg domain $1 '.Aliases.Items += [$domain]' dist.json > tmp.$$.json && mv tmp.$$.json dist.json
+domains_count=$(jq -r '.Aliases.Items | length' dist.json)
+echo "Domains count: $domains_count"
+jq -r --argjson domains_count "$domains_count" '.Aliases.Quantity = $domains_count' dist.json > tmp.$$.json && mv tmp.$$.json dist.json
+
+#Update the CloudFront Dist. with the new config.
+/usr/local/bin/aws cloudfront   update-distribution --if-match $ETag --id $CF_Dist_id --distribution-config file://dist.json >/dev/null
+
+
+#remove the config file
+rm dist.json
+
+    Save the script as certs.sh
+    Run the script with your new domain, this will generate and import the cert to ACM and update the Dist. with Alt name: ./certs.sh aaa.example.com
+    Generate the ssl cert for this domain for NGINX use: certbot certonly --nginx --non-interactive --agree-tos --email me@example.com -d aaa.example.com
+    Update the same Virtual Host file from step 3 above with its final config: and restart NGINX (sudo nginx -s reload):
+
+        server {
+          listen 80;
+          listen [::]:80;
+
+          server_name aaa.example.com;
+          access_log /var/log/nginx/aaa.example.com-access.log;
+          error_log /var/log/nginx/aaa.example.com-error.log;
+          return 301 https://aaa.example.com$request_uri; # Redirect to https
+          }
+
+        server {
+          listen 443 ssl http2;
+          listen [::]:443 ssl http2;
+
+          server_name aaa.example.com;
+          access_log /var/log/nginx/aaa.example.com-ssl-access.log;
+          error_log /var/log/nginx/aaa.example.com-ssl-error.log;
+
+          ssl on;
+          ssl_certificate /etc/letsencrypt/live/aaa.example.com/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/aaa.example.com/privkey.pem;
+          ssl_session_timeout 5m;
+          ssl_protocols TLSv1 TLSv1.1 TLSv1.2 TLSv1.3;
+          ssl_dhparam /etc/ssl/certs/dhparam.pem;
+          ssl_ciphers 'EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH';
+          ssl_prefer_server_ciphers on;
+          ssl_session_cache shared:SSL:10m;
+
+          location /.well-known/acme-challenge/ {
+              root /web/sites/aaa.example.com/www/;
+          }
+          location / {
+              proxy_pass https://d2c4fb2vqtbx6f.cloudfront.net/channel/vfc-bcxfhh37u/;
+              proxy_set_header host $host;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_ssl_protocols TLSv1 TLSv1.1 TLSv1.2 TLSv1.3;
+              proxy_ssl_server_name on;
+              proxy_read_timeout 5m;
+              proxy_set_header Access-Control-Allow-Credentials true;
+              proxy_set_header Content-Encoding gzip;
+
+
+          }
+        }
+
+
+
+
+
+
+
+##
+# You should look at the following URL's in order to grasp a solid understanding
+# of Nginx configuration files in order to fully unleash the power of Nginx.
+# https://www.nginx.com/resources/wiki/start/
+# https://www.nginx.com/resources/wiki/start/topics/tutorials/config_pitfalls/
+# https://wiki.debian.org/Nginx/DirectoryStructure
+#
+# In most cases, administrators will remove this file from sites-enabled/ and
+# leave it as reference inside of sites-available where it will continue to be
+# updated by the nginx packaging team.
+#
+# This file will automatically load configuration files provided by other
+# applications, such as Drupal or Wordpress. These applications will be made
+# available underneath a path with that package name, such as /drupal8.
+#
+# Please see /usr/share/doc/nginx-doc/examples/ for more detailed examples.
+##
+
+# Default server configuration
+#
+server {
+
+        # SSL configuration
+        #
+        # listen 443 ssl default_server;
+        # listen [::]:443 ssl default_server;
+        #
+        # Note: You should disable gzip for SSL traffic.
+        # See: https://bugs.debian.org/773332
+        #
+        # Read up on ssl_ciphers to ensure a secure configuration.
+        # See: https://bugs.debian.org/765782
+        #
+        # Self signed certs generated by the ssl-cert package
+        # Don't use them in a production server!
+        #
+        # include snippets/snakeoil.conf;
+
+#       root /home/ubuntu/website1_website/build;
+
+        # Add index.php to the list if you are using PHP
+#       index index.html index.htm index.nginx-debian.html;
+         server_name website1.com; # managed by Certbot
+
+
+        location / {
+    root /home/ubuntu/website1_website/build;
+  #proxy_pass https://d2cemxxh20py4t.cloudfront.net/;
+  #      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+   #     proxy_set_header X-Real-IP $remote_addr;
+                     #  proxy_pass https://d2cemxxh20py4t.cloudfront.net;
+     #                  proxy_http_version 1.1;
+      #                 proxy_set_header Upgrade $http_upgrade;
+   #                    proxy_set_header Connection "upgrade";
+    #                   client_max_body_size 200M;
+                # First attempt to serve request as file, then
+                # as directory, then fall back to displaying a 404.
+#               try_files $uri $uri/ =404;
+                try_files $uri $uri/ /index.html;
+#        index  index.html index.htm;
+                index index.html index.htm index.nginx-debian.html;
+        }
+
+        #location /api {
+        #               proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        #               proxy_set_header Host $host;
+        #               proxy_pass https://website1-prob-website-alb-18205014.ap-south-1.elb.amazonaws.com;
+        #               proxy_http_version 1.1;
+        #               proxy_set_header Upgrade $http_upgrade;
+        #               proxy_set_header Connection "upgrade";
+        #               client_max_body_size 200M;
+
+        #  }
+
+        # location /schedules {
+        #               proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        #               proxy_set_header Host $host;
+        #               proxy_pass https://website1-prob-website-alb-18205014.ap-south-1.elb.amazonaws.com;
+        #               proxy_http_version 1.1;
+        #               proxy_set_header Upgrade $http_upgrade;
+        #               proxy_set_header Connection "upgrade";
+        #               client_max_body_size 200M;
+
+        #  }
+        # pass PHP scripts to FastCGI server
+        #
+        #location ~ \.php$ {
+        #       include snippets/fastcgi-php.conf;
+        #
+        #       # With php-fpm (or other unix sockets):
+        #       fastcgi_pass unix:/var/run/php/php7.0-fpm.sock;
+        #       # With php-cgi (or other tcp sockets):
+        #       fastcgi_pass 127.0.0.1:9000;
+        #}
+
+        # deny access to .htaccess files, if Apache's document root
+        # concurs with nginx's one
+        #
+        #location ~ /\.ht {
+        #       deny all;
+        #}
+
+
+    listen [::]:443 ssl ipv6only=on; # managed by Certbot
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/website1.com/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/website1.com/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+
+
+
+}
+server {
+    if ($host = website1.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+        listen 80 ;
+        listen [::]:80 ;
+    server_name website1.com;
+    return 404; # managed by Certbot
+
+
+}
+
+server {
+    if ($host = website1.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+        listen 80 default_server;
+        listen [::]:80 default_server;
+    server_name website1.com;
+    return 404; # managed by Certbot
+
+
+}
+
+server {
+
+        # SSL configuration
+        #
+        # listen 443 ssl default_server;
+        # listen [::]:443 ssl default_server;
+        #
+        # Note: You should disable gzip for SSL traffic.
+        # See: https://bugs.debian.org/773332
+        #
+        # Read up on ssl_ciphers to ensure a secure configuration.
+        # See: https://bugs.debian.org/765782
+        #
+        # Self signed certs generated by the ssl-cert package
+        # Don't use them in a production server!
+        #
+        # include snippets/snakeoil.conf;
+
+#       root /home/ubuntu/website1_website/build;
+
+        # Add index.php to the list if you are using PHP
+#       index index.html index.htm index.nginx-debian.html;
+    server_name website2.com ; # managed by Certbot
+#rewrite ^/(.*)$ https://d1cns36esoxavb.cloudfront.net/$1 permanent;
+#return 301 https://d1cns36esoxavb.cloudfront.net$request_uri;
+          ssl on;
+        #  ssl_session_timeout 5m;
+          ssl_protocols TLSv1.3;
+    #      ssl_dhparam /etc/ssl/certs/dhparam.pem;
+        #  ssl_ciphers 'EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH';
+        #  ssl_prefer_server_ciphers on;
+          ssl_session_cache shared:SSL:10m;
+       location / {
+              proxy_pass https://d1cns36esoxavb.cloudfront.net/;
+              proxy_set_header host $host;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_ssl_protocols TLSv1 TLSv1.1 TLSv1.2 TLSv1.3;
+              proxy_ssl_server_name on;
+              proxy_read_timeout 5m;
+              proxy_set_header Access-Control-Allow-Credentials true;
+              proxy_set_header Content-Encoding gzip;
+
+   #  proxy_pass https://website2.aulas.one;
+    #    proxy_set_header Host website2.aulas.one;
+     #   proxy_set_header X-Real-IP $remote_addr;
+      #  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      #  proxy_set_header X-Forwarded-Proto https;
+  #  root /home/ubuntu/website1_website/build;
+    #    proxy_pass http://website2-prod.s3-website.ap-south-1.amazonaws.com;
+     #   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      #  proxy_set_header X-Real-IP $remote_addr;
+                     #  proxy_pass https://d2cemxxh20py4t.cloudfront.net;
+       #                proxy_http_version 1.1;
+        #               proxy_set_header Upgrade $http_upgrade;
+         #              proxy_set_header Connection "upgrade";
+          #             client_max_body_size 200M;
+                # First attempt to serve request as file, then
+                # as directory, then fall back to displaying a 404.
+#               try_files $uri $uri/ =404;
+  ##              try_files $uri $uri/ /index.html;
+            #     index  index.html index.htm;
+    ##             index index.html index.htm index.nginx-debian.html;
+
+   ## resolver 8.8.8.8;
+ ##   proxy_http_version     1.1;
+ ##   proxy_redirect off;
+  ##  proxy_set_header       Connection "";
+  ##  proxy_set_header       Authorization '';
+  ##  proxy_set_header       Host  http://website2-prod.s3-website.ap-south-1.amazonaws.com;
+  ##  proxy_set_header       X-Real-IP $remote_addr;
+   ## proxy_set_header       X-Forwarded-For $proxy_add_x_forwarded_for;
+   ## proxy_hide_header      x-amz-id-2;
+   ## proxy_hide_header      x-amz-request-id;
+  ##  proxy_hide_header      x-amz-meta-server-side-encryption;
+  ##  proxy_hide_header      x-amz-server-side-encryption;
+  ##  proxy_hide_header      Set-Cookie;
+  ##  proxy_ignore_headers   Set-Cookie;
+  ##  proxy_intercept_errors on;
+    #add_header             Cache-Control max-age=31536000;
+  ##  proxy_pass            https://website2-prod.s3-website.ap-south-1.amazonaws.com;
+
+ }
+location /api {
+    proxy_pass http://13.235.73.167:3000/api;
+    #proxy_set_header Upgrade $http_upgrade;
+    #proxy_set_header Connection 'upgrade';
+    #proxy_set_header Host $host;
+    #proxy_cache_bypass $http_upgrade;
+    client_max_body_size 200M;
+}
+
+
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/website2.com/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/website2.com/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+
+}
+
+
+server {
+    if ($host = website2.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    server_name website2.com;
+    listen 80;
+    return 404; # managed by Certbot
+
+
+}
+server {
+
+        server_name www.website2.com   ;
+        rewrite ^/(.*)$ https://website2.com/$1 permanent;
+
+
+  #  listen 443 ssl; # managed by Certbot
+   # ssl_certificate /etc/letsencrypt/live/wecsite3.org/fullchain.pem; # managed by Certbot
+   # ssl_certificate_key /etc/letsencrypt/live/wecsite3.org/privkey.pem; # managed by Certbot
+   # include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+   # ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+
+
+
+
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/www.website2.com/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/www.website2.com/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+}
+server {
+
+        server_name wecsite3.org   ;
+        rewrite ^/(.*)$ https://website2.com/$1 permanent;
+
+
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/wecsite3.org/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/wecsite3.org/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+#    location /api {
+ #   proxy_pass http://13.235.73.167:3000/api;
+    #proxy_set_header Upgrade $http_upgrade;
+    #proxy_set_header Connection 'upgrade';
+    #proxy_set_header Host $host;
+    #proxy_cache_bypass $http_upgrade;
+ #   client_max_body_size 200M;
+#}
+
+}
+
+server {
+    if ($host = wecsite3.org) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+#  if($host = www.wecsite3.org) {
+ #    return 301 https://$host$request_uri;
+#}
+
+        server_name wecsite3.org www.wecsite3.org  ;
+    return 404; # managed by Certbot
+
+
+
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/www.wecsite3.org/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/www.wecsite3.org/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+}
+server {
+
+        server_name www.wecsite3.org   ;
+        rewrite ^/(.*)$ https://website2.com/$1 permanent;
+}
+
+
+server {
+    if ($host = wecsite3.org) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    if ($host = www.wecsite3.org) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+
+        server_name wecsite3.org www.wecsite3.org  ;
+    listen 80;
+    return 404; # managed by Certbot
+
+
+
+
+}
+
+server {
+    if ($host = www.website2.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+
+        server_name www.website2.com   ;
+    listen 80;
+    return 404; # managed by Certbot
+
+
+}
+#website1 replace web address
+# website2 replace with 2 web adderss
+# website3 
