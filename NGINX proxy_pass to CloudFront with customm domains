@@ -1,0 +1,112 @@
+NGINX proxy_pass to CloudFront with customm domains
+Created a bash script that will update the certificate:
+## install nginx
+#!/bin/bash
+
+CF_Dist_id=ES70C33IOVC7G
+Cert_ARN=arn:aws:acm:us-east-1:723678323458:certificate/48g54dre-5t6b-gf20-9c74-5d6435333dd5
+Cert_Name=allcustomdomain
+Region=us-east-1 #Certs must remain in us-east-1 regardless of your env. region
+
+#List all existing domains and add them to array
+mapfile -t domains  < <(sudo cat /etc/letsencrypt/live/$Cert_Name/cert.pem | openssl x509 -text | grep DNS | tr , '\n' | sed 's/DNS://g' | tr -s ' ')
+
+#Check if cert already exist
+if [[ $domains == *"$1"* ]]; then
+  echo "Certificate already exists"
+  exit 1
+fi
+
+#Build domains list for certbot
+i=0
+while [ $i -le $(("${#domains[@]}"-1)) ];
+do
+        domainslst="$domainslst -d "${domains[$i]}""
+        i=$(($i+1))
+done
+
+domainslst="$domainslst -d $1"
+
+echo $domainslst
+
+
+#Generate certificate
+sudo certbot certonly  --expand --nginx  --non-interactive --agree-tos --email me@example.com --cert-name $Cert_Name $domainslst
+
+#Update ACM with new cert
+sudo /usr/local/bin/aws acm import-certificate --certificate-arn $Cert_ARN --certificate fileb:///etc/letsencrypt/live/$Cert_Name/cert.pem --private-key fileb:///etc/letsencrypt/live/$Cert_Name/privkey.pem --certificate-chain fileb:///etc/letsencrypt/live/$Cert_Name/fullchain.pem --region $Region
+
+
+#Get current CloudFront dist config
+ETag=$(/usr/local/bin/aws cloudfront get-distribution-config --id $CF_Dist_id | jq -r '.ETag')
+/usr/local/bin/aws cloudfront get-distribution-config --query 'DistributionConfig' --id $CF_Dist_id > dist.json
+
+#Update the config file with the new custom domain
+jq --arg domain $1 '.Aliases.Items += [$domain]' dist.json > tmp.$$.json && mv tmp.$$.json dist.json
+domains_count=$(jq -r '.Aliases.Items | length' dist.json)
+echo "Domains count: $domains_count"
+jq -r --argjson domains_count "$domains_count" '.Aliases.Quantity = $domains_count' dist.json > tmp.$$.json && mv tmp.$$.json dist.json
+
+#Update the CloudFront Dist. with the new config.
+/usr/local/bin/aws cloudfront   update-distribution --if-match $ETag --id $CF_Dist_id --distribution-config file://dist.json >/dev/null
+
+
+#remove the config file
+rm dist.json
+
+    Save the script as certs.sh
+    Run the script with your new domain, this will generate and import the cert to ACM and update the Dist. with Alt name: ./certs.sh aaa.example.com
+    Generate the ssl cert for this domain for NGINX use: certbot certonly --nginx --non-interactive --agree-tos --email me@example.com -d aaa.example.com
+    Update the same Virtual Host file from step 3 above with its final config: and restart NGINX (sudo nginx -s reload):
+
+        server {
+          listen 80;
+          listen [::]:80;
+
+          server_name aaa.example.com;
+          access_log /var/log/nginx/aaa.example.com-access.log;
+          error_log /var/log/nginx/aaa.example.com-error.log;
+          return 301 https://aaa.example.com$request_uri; # Redirect to https
+          }
+
+        server {
+          listen 443 ssl http2;
+          listen [::]:443 ssl http2;
+
+          server_name aaa.example.com;
+          access_log /var/log/nginx/aaa.example.com-ssl-access.log;
+          error_log /var/log/nginx/aaa.example.com-ssl-error.log;
+
+          ssl on;
+          ssl_certificate /etc/letsencrypt/live/aaa.example.com/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/aaa.example.com/privkey.pem;
+          ssl_session_timeout 5m;
+          ssl_protocols TLSv1 TLSv1.1 TLSv1.2 TLSv1.3;
+          ssl_dhparam /etc/ssl/certs/dhparam.pem;
+          ssl_ciphers 'EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH';
+          ssl_prefer_server_ciphers on;
+          ssl_session_cache shared:SSL:10m;
+
+          location /.well-known/acme-challenge/ {
+              root /web/sites/aaa.example.com/www/;
+          }
+          location / {
+              proxy_pass https://d2c4fb2vqtbx6f.cloudfront.net/channel/vfc-bcxfhh37u/;
+              proxy_set_header host $host;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_ssl_protocols TLSv1 TLSv1.1 TLSv1.2 TLSv1.3;
+              proxy_ssl_server_name on;
+              proxy_read_timeout 5m;
+              proxy_set_header Access-Control-Allow-Credentials true;
+              proxy_set_header Content-Encoding gzip;
+
+
+          }
+        }
+
+
+
+
+
+
