@@ -1,0 +1,28 @@
+version: "3.4"
+services:
+  rabbitmq3:
+    container_name: "rabbitmq_sample"
+    image: rabbitmq:3.8-management-alpine
+    environment:
+      - RABBITMQ_DEFAULT_USER=admin
+      - RABBITMQ_DEFAULT_PASS=admin123
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    volumes:
+        - /home/ubuntu/.docker-conf/rabbitmq/data/:/var/lib/rabbitmq/  #outsidepath:insidepath
+        - /home/ubuntu/.docker-conf/rabbitmq/log/:/var/log/rabbitmq/
+
+volumes:
+  rabbitmq_data_volume:
+    driver: local
+    driver_opts:
+       o: bind
+       type: none
+       device: /home/ubuntu/.docker-conf/rabbitmq/data/
+  rabbitmq_log_volume:
+    driver: local
+    driver_opts:
+       o: bind
+       type: none
+       device: /home/ubuntu/.docker-conf/rabbitmq/log/
