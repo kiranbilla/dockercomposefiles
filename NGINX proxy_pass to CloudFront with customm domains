@@ -1,5 +1,6 @@
 NGINX proxy_pass to CloudFront with customm domains
 Created a bash script that will update the certificate:
+#https://stackoverflow.com/questions/70839067/nginx-proxy-pass-to-cloudfront-with-customm-domains
 ## install nginx
 #!/bin/bash
 
